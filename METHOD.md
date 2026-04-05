@@ -91,7 +91,7 @@ Spec: `docs/modules/<MODULE>.md`
 **Rules:**
 - One file per module — never combine modules
 - Ticket IDs use the module prefix: `META-01`, `RPT-01`, `ONB-01`, etc.
-- Status is either `⬜ TODO` or `✅ Done`
+- Completed tickets are marked with `✅ Done` in the Status or Notes column. Any ticket row without `✅` is treated as open by the build system — so `⬜ TODO`, blank status, or any other text all count as "not done yet"
 - Notes column is filled in by the agent after completing the ticket
 - Phases group related tickets — infrastructure first, then features, then tests
 

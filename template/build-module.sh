@@ -152,11 +152,11 @@ if [ ! -f "$KANBAN_FILE" ]; then
   exit 1
 fi
 
-# Extract open tickets: lines containing the unchecked box emoji
+# Extract open tickets: ticket rows that are NOT marked ✅ Done
 TICKET_LINES=()
 while IFS= read -r line; do
   TICKET_LINES+=("$line")
-done < <(grep -E '^\|.*⬜' "$KANBAN_FILE")
+done < <(grep -E '^\|\s*[A-Z]+-[0-9]+' "$KANBAN_FILE" | grep -v '✅')
 
 if [ ${#TICKET_LINES[@]} -eq 0 ]; then
   echo ""
