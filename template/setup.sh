@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup.sh — Initialize a new project using the Claude Project System.
+# setup.sh — Initialize a new project using the Self-Building Board system.
 # Usage: bash setup.sh <project-name>
 #   e.g.: bash setup.sh my-saas-app
 #
@@ -119,7 +119,7 @@ echo "[4/5] Initializing git repo..."
 if [ ! -d .git ]; then
   git init
   git add -A
-  git commit -m "Initial project setup via Claude Project System"
+  git commit -m "Initial project setup via Self-Building Board"
   echo "  Git repo initialized"
 else
   echo "  Git repo already exists, skipping"

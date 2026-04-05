@@ -1,4 +1,4 @@
-# Claude Project System
+# Self-Building Board
 
 A reusable methodology and template for managing large projects with Claude Code.
 

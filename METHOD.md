@@ -1,4 +1,4 @@
-# The Claude Project System — A Methodology for Building Large Projects with Claude Code
+# The Self-Building Board — A Methodology for Building Large Projects with Claude Code
 
 A repeatable system for taking a project from idea to production using Claude Code. Designed for non-developers who direct AI agents to build software.
 
@@ -228,7 +228,7 @@ These rules prevent context window bloat and ensure agents work efficiently:
 
 ```bash
 # 1. Copy the template
-cp -r claude-project-system/template/ ~/Claude\ Code\ Projects/my-new-project/
+cp -r self-building-board/template/ ~/Claude\ Code\ Projects/my-new-project/
 cd ~/Claude\ Code\ Projects/my-new-project/
 
 # 2. Run setup

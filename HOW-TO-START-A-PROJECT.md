@@ -1,6 +1,6 @@
 # How to Start a New Project — Step by Step
 
-This is a plain English guide for you (Alon) to follow every time you want to build a new project using the Claude Project System. No technical jargon. Just actions.
+This is a plain English guide for you (Alon) to follow every time you want to build a new project using the Self-Building Board system. No technical jargon. Just actions.
 
 ---
 
@@ -14,10 +14,10 @@ You need one thing: **a clear idea of what you want to build.** It doesn't need 
 
 Open Claude Code and tell it:
 
-> "Create a new project called [your project name] using the Claude Project System template."
+> "Create a new project called [your project name] using the Self-Building Board template."
 
 Claude will:
-- Copy the template files from `claude-project-system/template/` into a new folder
+- Copy the template files from `self-building-board/template/` into a new folder
 - Run the setup script that creates all the necessary folders and installs the dashboard button system
 - Initialize a git repository
 
