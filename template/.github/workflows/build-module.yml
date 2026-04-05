@@ -1,0 +1,438 @@
+# Self-Building Board — 5-Agent Build Pipeline
+# Runs on self-hosted Mac runner using Claude Max subscription.
+# Triggered from dashboard button or GitHub Actions UI.
+
+name: Build Module
+
+on:
+  workflow_dispatch:
+    inputs:
+      module:
+        description: 'Module to build (e.g., meta, reports, onboarding)'
+        required: true
+        type: string
+
+# Only one build per module at a time
+concurrency:
+  group: build-${{ github.event.inputs.module }}
+  cancel-in-progress: false
+
+jobs:
+  # ─── Step 1: Compute dependency layers from GitHub Issues ───
+  plan:
+    name: Plan — Compute Layers
+    runs-on: self-hosted
+    outputs:
+      layers: ${{ steps.compute.outputs.layers }}
+      total_issues: ${{ steps.compute.outputs.total_issues }}
+      total_layers: ${{ steps.compute.outputs.total_layers }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute dependency layers
+        id: compute
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODULE: ${{ github.event.inputs.module }}
+        run: |
+          echo "Fetching open issues for module:${MODULE}..."
+
+          # Get all open issues with this module label
+          ISSUES=$(gh issue list --label "module:${MODULE}" --state open --json number,title,body --jq '
+            [.[] | select(.title | test("\\[MODULE PRD\\]|\\[SYSTEM PRD\\]") | not) | {
+              number: .number,
+              title: .title,
+              deps: (.body | split("## Blocked by")[1] // "" | split("##")[0] | [scan("#([0-9]+)") | .[0] | tonumber])
+            }]
+          ')
+
+          echo "Issues found: $(echo "$ISSUES" | jq length)"
+
+          # Compute layers using Python
+          LAYERS=$(echo "$ISSUES" | python3 -c '
+          import json, sys
+          issues = json.load(sys.stdin)
+          if not issues:
+              print(json.dumps([]))
+              sys.exit(0)
+
+          issue_map = {i["number"]: i for i in issues}
+          issue_nums = set(i["number"] for i in issues)
+          layers = {}
+
+          def get_layer(num):
+              if num in layers:
+                  return layers[num]
+              issue = issue_map.get(num)
+              if not issue:
+                  layers[num] = 0
+                  return 0
+              # Only consider deps that are in our open issue set
+              open_deps = [d for d in issue["deps"] if d in issue_nums]
+              if not open_deps:
+                  layers[num] = 1
+                  return 1
+              max_dep = max(get_layer(d) for d in open_deps)
+              layers[num] = max_dep + 1
+              return layers[num]
+
+          for i in issues:
+              get_layer(i["number"])
+
+          by_layer = {}
+          for num, layer in sorted(layers.items(), key=lambda x: x[1]):
+              if layer > 0:
+                  by_layer.setdefault(layer, []).append(num)
+
+          result = []
+          for layer_num in sorted(by_layer.keys()):
+              result.append({
+                  "layer": layer_num,
+                  "issues": by_layer[layer_num]
+              })
+
+          print(json.dumps(result))
+          ')
+
+          TOTAL_ISSUES=$(echo "$ISSUES" | jq length)
+          TOTAL_LAYERS=$(echo "$LAYERS" | jq length)
+
+          echo "layers=${LAYERS}" >> "$GITHUB_OUTPUT"
+          echo "total_issues=${TOTAL_ISSUES}" >> "$GITHUB_OUTPUT"
+          echo "total_layers=${TOTAL_LAYERS}" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "=== BUILD PLAN ==="
+          echo "Module: ${MODULE}"
+          echo "Total issues: ${TOTAL_ISSUES}"
+          echo "Total layers: ${TOTAL_LAYERS}"
+          echo "$LAYERS" | jq -r '.[] | "Layer \(.layer): issues \(.issues | map("#\(.)") | join(", "))"'
+
+  # ─── Step 2: Build each layer sequentially, issues within layer in parallel ───
+  build:
+    name: Build Layer
+    needs: plan
+    if: needs.plan.outputs.total_issues != '0'
+    runs-on: self-hosted
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODULE: ${{ github.event.inputs.module }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build all layers
+        env:
+          LAYERS: ${{ needs.plan.outputs.layers }}
+        run: |
+          TOTAL_LAYERS=$(echo "$LAYERS" | jq length)
+          SUCCEEDED=0
+          FAILED=0
+          ESCALATED=""
+
+          for LAYER_IDX in $(seq 0 $((TOTAL_LAYERS - 1))); do
+            LAYER_NUM=$(echo "$LAYERS" | jq -r ".[$LAYER_IDX].layer")
+            ISSUE_NUMS=$(echo "$LAYERS" | jq -r ".[$LAYER_IDX].issues[]")
+            ISSUE_COUNT=$(echo "$LAYERS" | jq ".[$LAYER_IDX].issues | length")
+
+            echo ""
+            echo "════════════════════════════════════════"
+            echo "  LAYER ${LAYER_NUM} — ${ISSUE_COUNT} issue(s)"
+            echo "════════════════════════════════════════"
+
+            # Build issues in this layer (sequentially for now, parallel in future)
+            for ISSUE_NUM in $ISSUE_NUMS; do
+              echo ""
+              echo "──── Building issue #${ISSUE_NUM} ────"
+
+              # Fetch issue details
+              ISSUE_JSON=$(gh issue view "$ISSUE_NUM" --json title,body,labels)
+              ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+              ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body')
+
+              echo "Title: ${ISSUE_TITLE}"
+              echo ""
+
+              # Create temp directory for agent handoff files
+              HANDOFF_DIR=$(mktemp -d)
+              TICKET_FILE="${HANDOFF_DIR}/ticket.md"
+              RESEARCH_FILE="${HANDOFF_DIR}/research-briefing.md"
+              QA_SPEC_FILE="${HANDOFF_DIR}/qa-spec.md"
+
+              # Write ticket to file
+              echo "# Issue #${ISSUE_NUM}: ${ISSUE_TITLE}" > "$TICKET_FILE"
+              echo "" >> "$TICKET_FILE"
+              echo "$ISSUE_BODY" >> "$TICKET_FILE"
+
+              RETRY_COUNT=0
+              MAX_RETRIES=3
+              BUILD_SUCCESS=false
+
+              # ─── Agent 1: Researcher (Sonnet) ───
+              echo "  [1/5] Researcher — reading codebase and producing briefing..."
+              RESEARCHER_PROMPT="You are the Researcher agent for the Self-Building Board pipeline. Your job is to read the codebase and produce a distilled tech briefing.
+
+              TICKET: $(cat "$TICKET_FILE")
+
+              MODULE: ${MODULE}
+
+              INSTRUCTIONS:
+              1. Read docs/modules/${MODULE}.md (the module README) for full context
+              2. Read docs/system/interface-contracts.md for cross-module boundaries
+              3. Read existing source files in src/features/ that are relevant to this ticket
+              4. Produce a BRIEFING that tells the Coder exactly what they need to know:
+                 - What files exist and their current state
+                 - What patterns and conventions are used
+                 - What interfaces/contracts this ticket must honor
+                 - What dependencies exist
+                 - Any gotchas or constraints
+              5. Write the briefing to: ${RESEARCH_FILE}
+
+              Do NOT write any code. Only research and brief."
+
+              claude -p "$RESEARCHER_PROMPT" --model sonnet --dangerously-skip-permissions 2>&1 || true
+
+              # ─── Agent 2: Quality Architect (Sonnet) ───
+              echo "  [2/5] Quality Architect — defining TDD specs and quality criteria..."
+              QA_ARCH_PROMPT="You are the Quality Architect agent for the Self-Building Board pipeline. Your job is to define TDD test specifications and quality criteria.
+
+              TICKET: $(cat "$TICKET_FILE")
+
+              RESEARCHER BRIEFING: $(cat "$RESEARCH_FILE" 2>/dev/null || echo 'No briefing file found — proceed with ticket only.')
+
+              INSTRUCTIONS:
+              1. Read the ticket and the Researcher's briefing
+              2. Define TDD test specifications:
+                 - What test files to create
+                 - What each test should verify
+                 - What edge cases to cover
+                 - Expected inputs and outputs for each test
+              3. Define quality criteria:
+                 - Performance requirements (if any)
+                 - Efficiency standards
+                 - Code patterns to follow
+                 - Things to avoid
+              4. Write the spec to: ${QA_SPEC_FILE}
+
+              Do NOT write any code. Only define test specs and quality criteria."
+
+              claude -p "$QA_ARCH_PROMPT" --model sonnet --dangerously-skip-permissions 2>&1 || true
+
+              # ─── Agent 3-5: Coder + Reviewer + QA loop ───
+              while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$BUILD_SUCCESS" = false ]; do
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                echo "  [3/5] Coder (attempt ${RETRY_COUNT}/${MAX_RETRIES}) — writing TDD tests then implementing..."
+
+                CODER_PROMPT="You are the Coder agent for the Self-Building Board pipeline. You are the ONLY agent that writes code.
+
+                TICKET: $(cat "$TICKET_FILE")
+
+                RESEARCHER BRIEFING: $(cat "$RESEARCH_FILE" 2>/dev/null || echo 'No briefing available.')
+
+                QUALITY ARCHITECT SPEC: $(cat "$QA_SPEC_FILE" 2>/dev/null || echo 'No QA spec available.')
+
+                RETRY: ${RETRY_COUNT} of ${MAX_RETRIES}
+
+                INSTRUCTIONS — follow TDD strictly:
+                1. Read the Quality Architect's test specs
+                2. Write FAILING tests first that match those specs
+                3. Run tests — verify they FAIL (red phase)
+                4. Write the minimum code to make tests PASS (green phase)
+                5. Refactor if needed
+                6. Run tests again — verify they PASS
+                7. Run npx tsc --noEmit — fix any type errors
+                8. Commit your work with a descriptive message
+
+                Do NOT skip TDD. Tests FIRST, then implementation."
+
+                claude -p "$CODER_PROMPT" --model opus --dangerously-skip-permissions 2>&1
+                CODER_EXIT=$?
+
+                if [ $CODER_EXIT -ne 0 ]; then
+                  echo "  Coder failed with exit code ${CODER_EXIT}"
+                  continue
+                fi
+
+                # ─── Agent 4: Reviewer (Sonnet) ───
+                echo "  [4/5] Reviewer — checking correctness against spec..."
+                REVIEWER_PROMPT="You are the Reviewer agent for the Self-Building Board pipeline. Check correctness ONLY.
+
+                TICKET: $(cat "$TICKET_FILE")
+
+                INSTRUCTIONS:
+                1. Read the code that was just written (check recent git changes with git diff HEAD~1)
+                2. Compare against the ticket's acceptance criteria
+                3. Run tests: npx vitest run
+                4. Run type check: npx tsc --noEmit
+                5. If EVERYTHING passes and matches spec: output exactly 'REVIEW: PASS'
+                6. If anything fails: output 'REVIEW: FAIL' followed by specific feedback
+
+                Do NOT judge code style or suggest improvements. Correctness only."
+
+                REVIEW_OUTPUT=$(claude -p "$REVIEWER_PROMPT" --model sonnet --dangerously-skip-permissions 2>&1)
+
+                if echo "$REVIEW_OUTPUT" | grep -q "REVIEW: PASS"; then
+                  echo "  Reviewer: PASS"
+
+                  # ─── Agent 5: QA (Sonnet) ───
+                  echo "  [5/5] QA — comprehensive audit..."
+                  QA_PROMPT="You are the QA agent for the Self-Building Board pipeline. Comprehensive quality audit.
+
+                  TICKET: $(cat "$TICKET_FILE")
+
+                  QUALITY SPEC: $(cat "$QA_SPEC_FILE" 2>/dev/null || echo 'No QA spec available.')
+
+                  INSTRUCTIONS:
+                  1. Run ALL tests: npx vitest run
+                  2. Check for edge cases the Coder might have missed
+                  3. Check efficiency — is this O(n^2) when it could be O(n)?
+                  4. Ask: is this the BEST way to do it? Could it be simpler, faster, leaner?
+                  5. Verify the code fits with the broader codebase patterns
+                  6. If EVERYTHING is good: output exactly 'QA: PASS'
+                  7. If anything needs fixing: output 'QA: FAIL' followed by specific feedback
+
+                  Be thorough. This is the last check before the code ships."
+
+                  QA_OUTPUT=$(claude -p "$QA_PROMPT" --model sonnet --dangerously-skip-permissions 2>&1)
+
+                  if echo "$QA_OUTPUT" | grep -q "QA: PASS"; then
+                    echo "  QA: PASS"
+                    BUILD_SUCCESS=true
+                  else
+                    echo "  QA: FAIL — sending feedback to Coder"
+                  fi
+                else
+                  echo "  Reviewer: FAIL — sending feedback to Coder"
+                fi
+              done
+
+              # Handle result
+              if [ "$BUILD_SUCCESS" = true ]; then
+                echo "  ✓ Issue #${ISSUE_NUM} COMPLETED"
+                SUCCEEDED=$((SUCCEEDED + 1))
+
+                # Close the issue
+                gh issue close "$ISSUE_NUM" --comment "Built by Self-Building Board pipeline. All checks passed: Researcher, Quality Architect, Coder (TDD), Reviewer, QA."
+
+                # Push changes
+                git push origin main
+              else
+                echo "  ✗ Issue #${ISSUE_NUM} ESCALATED after ${MAX_RETRIES} attempts"
+                FAILED=$((FAILED + 1))
+                ESCALATED="${ESCALATED} #${ISSUE_NUM}"
+
+                # Label as escalated
+                gh issue edit "$ISSUE_NUM" --add-label "escalated"
+                gh issue comment "$ISSUE_NUM" --body "## Escalation Report
+
+                This issue was escalated after ${MAX_RETRIES} failed build attempts.
+
+                **Pipeline:** Researcher -> Quality Architect -> Coder -> Reviewer/QA loop
+                **Attempts:** ${MAX_RETRIES}
+                **Result:** Could not pass Reviewer/QA checks within retry limit.
+
+                **Suggested next steps:**
+                - Review the agent artifacts in the GitHub Actions run
+                - Check if the ticket spec is ambiguous
+                - Consider splitting into smaller issues
+                - Manual intervention may be needed"
+              fi
+
+              # Save handoff files as artifacts
+              if [ -d "$HANDOFF_DIR" ]; then
+                mkdir -p artifacts/issue-${ISSUE_NUM}
+                cp -r "$HANDOFF_DIR"/* artifacts/issue-${ISSUE_NUM}/ 2>/dev/null || true
+              fi
+
+              # Pull latest changes before next issue
+              git pull --rebase origin main 2>/dev/null || true
+
+            done  # end issues in layer
+          done  # end layers
+
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "  BUILD SUMMARY: ${MODULE}"
+          echo "  Succeeded: ${SUCCEEDED}"
+          echo "  Failed: ${FAILED}"
+          if [ -n "$ESCALATED" ]; then
+            echo "  Escalated:${ESCALATED}"
+          fi
+          echo "════════════════════════════════════════"
+
+      - name: Upload agent artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-handoff-${{ github.event.inputs.module }}
+          path: artifacts/
+          retention-days: 30
+
+  # ─── Step 3: Module Review + Architecture Check ───
+  review:
+    name: Module Review + Architecture Check
+    needs: build
+    runs-on: self-hosted
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODULE: ${{ github.event.inputs.module }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Pull latest
+        run: git pull origin main
+
+      - name: Module Review
+        run: |
+          echo "Running module review for ${MODULE}..."
+
+          REVIEW_PROMPT="You are reviewing the ${MODULE} module after all tickets were built.
+
+          INSTRUCTIONS:
+          1. Read the module spec at docs/modules/${MODULE}.md
+          2. Read all source code in src/features/ related to this module
+          3. Compare what was built against what the spec intended
+          4. For each area: what the spec says, what the code does, whether they match
+          5. Report any deviations
+          6. If deviations exist, create GitHub Issues for fixes labeled 'module:${MODULE}' and 'tech-debt'
+
+          Be thorough — this catches drift before it becomes a problem."
+
+          claude -p "$REVIEW_PROMPT" --model sonnet --dangerously-skip-permissions 2>&1 || true
+
+      - name: Architecture Check
+        run: |
+          echo "Running architecture check for ${MODULE}..."
+
+          ARCH_PROMPT="You are running an architecture health check on the ${MODULE} module.
+
+          INSTRUCTIONS:
+          1. Read all source code in src/features/ related to this module
+          2. Look for:
+             - Duplicated logic across files
+             - Inconsistent patterns
+             - Missing abstractions
+             - Overcomplicated code that could be simpler
+             - Efficiency issues
+          3. For each finding, create a GitHub Issue labeled 'module:${MODULE}' and 'tech-debt' with:
+             - What the issue is
+             - Where it is (file + line)
+             - What the improvement would be
+             - Why it matters
+          4. If the code is clean, report that — no issues needed
+
+          Focus on real problems, not style nitpicks."
+
+          claude -p "$ARCH_PROMPT" --model sonnet --dangerously-skip-permissions 2>&1 || true
+
+          # Push any changes from review
+          git push origin main 2>/dev/null || true
+
+      - name: Update dashboard
+        run: |
+          echo "Regenerating dashboard..."
+          cd dashboard 2>/dev/null && node generate.js && git add -A && git commit -m "Dashboard: ${MODULE} build complete" && git push origin main || true

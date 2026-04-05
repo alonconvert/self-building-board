@@ -1,88 +1,143 @@
 #!/usr/bin/env node
 
 /**
- * generate.js — Reads kanban/*.md files and embeds live ticket data
+ * generate.js — Reads GitHub Issues and injects live ticket data
  * into index.html as a JSON blob.
  *
- * Usage: node generate.js
- * Reads from: PROJECT_ROOT/docs/kanban/ (set PROJECT_ROOT env var, or defaults to ../project)
+ * Usage: GITHUB_REPO=owner/repo node generate.js
+ * Reads from: GitHub Issues API via `gh` CLI
  * Writes to:  ./index.html
+ *
+ * Requires: gh CLI authenticated (`gh auth login`)
  */
 
+const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const PROJECT_ROOT = process.env.PROJECT_ROOT
-  ? path.resolve(process.env.PROJECT_ROOT)
-  : path.resolve(__dirname, '../project');
-const KANBAN_DIR = path.join(PROJECT_ROOT, 'docs/kanban');
+const GITHUB_REPO = process.env.GITHUB_REPO;
 const INDEX_HTML = path.join(__dirname, 'index.html');
 
-// Parse a single kanban markdown file
-function parseKanbanFile(filePath) {
-  const content = fs.readFileSync(filePath, 'utf-8');
-  const lines = content.split('\n');
-  const phases = [];
-  let currentPhase = null;
-
-  for (const line of lines) {
-    if (/^#\s+[^#]/.test(line)) continue;
-
-    const phaseMatch = line.match(/^#{2,3}\s+(.+)/);
-    if (phaseMatch) {
-      if (currentPhase) phases.push(currentPhase);
-      currentPhase = { title: phaseMatch[1].trim(), tickets: [] };
-      continue;
-    }
-
-    // Match ticket rows: | ID | description | status | ... |
-    const ticketMatch = line.match(/^\|\s*((?:[A-Z]+-\d+|(?:SCHED|DS-R)[-\d]+))\s*\|\s*([^|]+)/);
-    if (ticketMatch && currentPhase) {
-      const id = ticketMatch[1];
-      const title = ticketMatch[2].trim();
-      const done = /\u2705\s*Done/i.test(line);
-      currentPhase.tickets.push({ id, title, done });
-    }
-  }
-  if (currentPhase) phases.push(currentPhase);
-
-  return phases.filter(p => p.tickets.length > 0);
+if (!GITHUB_REPO) {
+  console.error('ERROR: Set GITHUB_REPO env var (e.g., GITHUB_REPO=alonconvert/my-project)');
+  process.exit(1);
 }
 
-function parseAllKanbans() {
-  const files = fs.readdirSync(KANBAN_DIR).filter(f => f.endsWith('.md'));
-  const result = {};
-  for (const file of files) {
-    const key = file.replace('.md', '');
-    result[key] = parseKanbanFile(path.join(KANBAN_DIR, file));
+function ghCommand(args) {
+  try {
+    return execSync(`gh ${args} --repo ${GITHUB_REPO}`, {
+      encoding: 'utf-8',
+      timeout: 30000,
+    }).trim();
+  } catch (e) {
+    console.error(`gh command failed: gh ${args}`);
+    console.error(e.message);
+    return null;
   }
-  return result;
 }
 
-function computeStats(kanbanData) {
+function fetchIssues() {
+  // Fetch all issues (open and closed) excluding PRDs
+  const json = ghCommand(
+    'issue list --state all --limit 500 --json number,title,state,labels,body'
+  );
+  if (!json) return [];
+
+  const issues = JSON.parse(json);
+
+  // Filter out PRD issues
+  return issues.filter(
+    (i) => !i.title.includes('[SYSTEM PRD]') && !i.title.includes('[MODULE PRD]')
+  );
+}
+
+function extractModuleFromLabels(labels) {
+  for (const label of labels) {
+    const match = label.name.match(/^module:(.+)$/);
+    if (match) return match[1];
+  }
+  return 'unassigned';
+}
+
+function isEscalated(labels) {
+  return labels.some((l) => l.name === 'escalated');
+}
+
+function extractBlockedBy(body) {
+  if (!body) return [];
+  const section = body.split('## Blocked by')[1];
+  if (!section) return [];
+  const beforeNext = section.split('##')[0];
+  const matches = beforeNext.match(/#(\d+)/g);
+  return matches ? matches.map((m) => parseInt(m.slice(1))) : [];
+}
+
+function computeStats(issues) {
   const modules = {};
   let totalOpen = 0;
   let totalDone = 0;
+  let totalEscalated = 0;
 
-  for (const [key, phases] of Object.entries(kanbanData)) {
-    let done = 0, total = 0;
-    for (const phase of phases) {
-      for (const t of phase.tickets) {
-        total++;
-        if (t.done) done++;
-      }
+  for (const issue of issues) {
+    const mod = extractModuleFromLabels(issue.labels);
+    if (!modules[mod]) {
+      modules[mod] = { done: 0, open: 0, escalated: 0, total: 0, issues: [] };
     }
-    const open = total - done;
-    totalOpen += open;
-    totalDone += done;
-    modules[key] = { done, total, open, pct: total > 0 ? Math.round((done / total) * 100) : 0, phases };
+
+    const done = issue.state === 'CLOSED';
+    const escalated = isEscalated(issue.labels);
+
+    modules[mod].total++;
+    if (done) {
+      modules[mod].done++;
+      totalDone++;
+    } else {
+      modules[mod].open++;
+      totalOpen++;
+    }
+    if (escalated) {
+      modules[mod].escalated++;
+      totalEscalated++;
+    }
+
+    modules[mod].issues.push({
+      number: issue.number,
+      title: issue.title,
+      done,
+      escalated,
+      blockedBy: extractBlockedBy(issue.body),
+    });
   }
 
-  return { modules, totalOpen, totalDone, totalTickets: totalOpen + totalDone };
+  // Compute percentages
+  for (const mod of Object.values(modules)) {
+    mod.pct = mod.total > 0 ? Math.round((mod.done / mod.total) * 100) : 0;
+  }
+
+  return {
+    modules,
+    totalOpen,
+    totalDone,
+    totalEscalated,
+    totalTickets: totalOpen + totalDone,
+  };
 }
 
-function injectData(html, stats) {
-  const dataJson = JSON.stringify(stats);
+function fetchBuildStatus() {
+  // Check if any workflow is currently running
+  const json = ghCommand(
+    'run list --workflow=build-module.yml --limit 1 --json status,name,startedAt,updatedAt,conclusion,headBranch'
+  );
+  if (!json) return null;
+
+  const runs = JSON.parse(json);
+  if (runs.length === 0) return null;
+
+  return runs[0];
+}
+
+function injectData(html, stats, buildStatus) {
+  const dataJson = JSON.stringify({ ...stats, buildStatus });
   const timestamp = new Date().toISOString();
 
   html = html.replace(
@@ -94,26 +149,31 @@ function injectData(html, stats) {
 }
 
 function main() {
-  if (!fs.existsSync(KANBAN_DIR)) {
-    console.error(`Kanban directory not found: ${KANBAN_DIR}`);
-    process.exit(1);
-  }
+  console.log(`Fetching issues from ${GITHUB_REPO}...`);
+  const issues = fetchIssues();
+  console.log(`  Found ${issues.length} issues`);
 
-  console.log('Parsing kanban files...');
-  const kanbanData = parseAllKanbans();
-  const stats = computeStats(kanbanData);
+  const stats = computeStats(issues);
 
   for (const [key, mod] of Object.entries(stats.modules)) {
-    console.log(`  ${key}: ${mod.done}/${mod.total} done (${mod.pct}%)`);
+    const escLabel = mod.escalated > 0 ? ` (${mod.escalated} escalated)` : '';
+    console.log(`  ${key}: ${mod.done}/${mod.total} done (${mod.pct}%)${escLabel}`);
   }
-  console.log(`\n  Total: ${stats.totalDone}/${stats.totalTickets} done, ${stats.totalOpen} open`);
+  console.log(
+    `\n  Total: ${stats.totalDone}/${stats.totalTickets} done, ${stats.totalOpen} open, ${stats.totalEscalated} escalated`
+  );
+
+  const buildStatus = fetchBuildStatus();
+  if (buildStatus) {
+    console.log(`\n  Latest build: ${buildStatus.status} (${buildStatus.conclusion || 'in progress'})`);
+  }
 
   console.log('\nInjecting data into index.html...');
   let html = fs.readFileSync(INDEX_HTML, 'utf-8');
-  html = injectData(html, stats);
+  html = injectData(html, stats, buildStatus);
   fs.writeFileSync(INDEX_HTML, html, 'utf-8');
 
-  console.log('Done! Dashboard updated with live data.');
+  console.log('Done! Dashboard updated with live data from GitHub.');
 }
 
 main();
