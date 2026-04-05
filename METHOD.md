@@ -116,6 +116,7 @@ Spec: `docs/modules/<MODULE>.md`
 - **"Build ALL" buttons** per module — one click launches Terminal and builds every open ticket sequentially
 - **"Build next ticket"** buttons — copies a prompt for building one ticket at a time
 - Auto-sync: board updates after every ticket completion
+- **Live build status banner** — when `build-module.sh` is running, the dashboard shows a real-time progress banner with spinner, current ticket, progress bar, elapsed time, and ETA. Polls `.build-status.json` every 3 seconds. You can monitor from any device.
 
 **The board does NOT add to agent context.** It's a human-facing tool. Agents interact with kanban `.md` files directly.
 
@@ -150,7 +151,18 @@ Build → Test → Fix → Update Kanban → Sync Board
 - **Clean isolation** — if one ticket has issues, it doesn't poison the next
 
 ### Sequential execution:
-The `build-module.sh` script handles this automatically. It reads the kanban, finds all open tickets, and launches a fresh `claude` session for each one. When one finishes, the next starts. You supervise each session.
+The `build-module.sh` script handles this automatically. It reads the kanban, finds all open tickets, and launches a fresh `claude` session for each one. When one finishes, the next starts.
+
+### Visual progress feedback:
+While the build runs, the terminal shows:
+- **Animated spinner** with elapsed time per ticket (e.g., `⠋ Building META-40... 3m 22s`)
+- **Color-coded results** — green checkmarks for success, red crosses for failures
+- **Progress bar** — `[██████░░░░░░] 33% — 1/3 tickets built`
+- **ETA** — estimated time remaining based on average ticket build time
+- **Per-ticket timing** — how long each ticket took to build
+- **Build summary** — total time and per-ticket breakdown at the end
+
+The script also writes a `.build-status.json` file that the dashboard polls every 3 seconds. When a build is running, the dashboard shows a live banner with the current ticket, progress bar, elapsed time, and ETA — so you can monitor from your phone or browser without watching the terminal.
 
 ---
 
@@ -185,7 +197,7 @@ On the dashboard, each module has a red "Build ALL" button. Clicking it:
 6. Board updates after each ticket
 7. Final review session runs at the end
 
-**Your role:** Click the button. Supervise. Approve tool calls. That's it.
+**Your role:** Click the button. Watch the progress banner on the dashboard (or the terminal spinner). The script handles everything automatically — no tool calls to approve (runs with `--dangerously-skip-permissions`). If a ticket fails, the script continues to the next one. Run it again to retry failed tickets.
 
 ### Setup
 

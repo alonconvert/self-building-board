@@ -146,7 +146,13 @@ Click the red **"Build ALL"** button on any module. This:
 5. When one ticket finishes, the next one starts automatically
 6. After all tickets: a final review session compares what was built against the original spec
 
-**Your role during this:** Supervise. Watch each Claude session work. Approve tool calls when prompted. If something looks wrong, intervene. When a session finishes, the next one starts on its own.
+**What you'll see while it runs:**
+
+In the **Terminal**: a spinner with elapsed time for each ticket, color-coded results, a progress bar, and an ETA for how long the remaining tickets will take. After each ticket, you'll see a summary of what was built and how long it took.
+
+On the **Dashboard**: a live status banner appears at the top of the page showing the current ticket being built, a progress bar, elapsed time, and estimated time remaining. This updates every 3 seconds — so you can monitor from your phone, iPad, or any browser without keeping the Terminal visible.
+
+**Your role during this:** Watch the progress. The build runs fully autonomously — no tool calls to approve. If a ticket fails, the script logs the error and moves on to the next one. You can re-run the script to retry any failed tickets (it skips already-completed ones).
 
 ---
 
@@ -196,6 +202,12 @@ Open Claude Code in the dashboard project folder and say: "Regenerate the board 
 
 ### "A ticket was built wrong"
 Click the ticket on the dashboard and use the "Fix" action. It will re-examine the code and fix issues.
+
+### "The build seems stuck — is it still running?"
+Look at the dashboard — if the live status banner is showing with a spinning indicator and updating elapsed time, it's still working. Each ticket can take 5-20 minutes. If the terminal shows a spinner with increasing time, it's running. If both are frozen for more than 30 minutes, the session may have hit an issue — close the terminal and run `bash build-module.sh <module>` again to continue from where it left off.
+
+### "Some tickets failed during Build ALL"
+The summary at the end shows which tickets failed. Just run `bash build-module.sh <module>` again — it reads the kanban fresh and only builds tickets still marked as open.
 
 ### "I want to change what a module does"
 Update the Module README and the kanban tickets. Then regenerate the dashboard. The system adapts.
