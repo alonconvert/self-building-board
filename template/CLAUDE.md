@@ -2,7 +2,10 @@
 
 ## How This Project Works
 
-This project uses the **Self-Building Board** methodology. Tickets are GitHub Issues. Builds run via GitHub Actions. A 5-agent pipeline handles each ticket: Researcher, Quality Architect, Coder, Reviewer, QA.
+This project uses the **Self-Building Board** methodology. Tickets may be
+tracked as GitHub Issues, but ordinary builds and the 5-agent pipeline run
+locally. GitHub Actions is a release confirmation surface only after Alon asks
+to release an exact local checkpoint.
 
 ## Context Isolation Rules (CRITICAL)
 
@@ -22,9 +25,13 @@ This project uses the **Self-Building Board** methodology. Tickets are GitHub Is
 
 ## After Completing a Ticket
 
-1. Commit and push the code
-2. Close the GitHub Issue: `gh issue close <number> --comment "Built: <summary>"`
-3. Push to trigger dashboard update
+1. Run the complete local proof.
+2. Save a coherent local checkpoint commit in the authoritative workspace.
+3. Record the local result without pushing, opening a pull request, closing a
+   remote issue, or starting hosted work.
+4. Only after Alon asks to release that exact checkpoint: create the temporary
+   release branch, push once, run hosted confirmation, deploy if applicable,
+   verify live, and retire the release branch.
 
 ## Commands
 
@@ -44,11 +51,11 @@ docs/system/build-order.md            # Module dependency layers
 docs/modules/<module>.md              # Module README (Researcher reads this)
 ```
 
-## CRITICAL: No Local Dev Servers
+## Local Verification
 
-**NEVER run `npm run dev`, `next dev`, or any long-running dev server.**
-Push to GitHub -> auto-deploy -> test on live URL.
-Safe to run: `npm run build`, `npm test`, `tsc --noEmit`, `eslint`, `prettier`.
+Use local builds, tests, and a bounded local dev server when UI verification is
+needed. Do not auto-deploy for development. Keep no more than two persistent dev
+servers across the workspace and stop a server when verification is complete.
 
 ## TDD is Mandatory
 
