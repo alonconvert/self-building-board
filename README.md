@@ -1,5 +1,12 @@
 # Self-Building Board
 
+> **Historical architecture record — cloud-first execution is retired.** The
+> GitHub Actions, self-hosted runner, push-per-ticket, and live-only testing flow
+> described below is preserved only as design history. Do not follow it for new
+> work. The active operating contract is `CLAUDE.md`: ordinary non-NITS
+> development runs in one local workspace, saves a local checkpoint, and uses
+> GitHub or deployment providers only after Alon requests a release.
+
 A complete methodology and toolkit for building large, production-grade software systems using Claude Code. Designed for non-developers who direct AI agents to build software.
 
 You describe what you want. The system grills you, writes specs, generates tickets, and builds everything — automatically, with quality checks at every step.
